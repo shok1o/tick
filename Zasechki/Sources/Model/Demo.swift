@@ -11,11 +11,14 @@ enum Demo {
         #endif
     }
 
-    /// -demoScreen thoughts — открыть вкладку «Мысли».
-    static var startOnThoughts: Bool {
+    /// -evening — показать вечерний итог дня в любое время.
+    static var forceEvening: Bool { isOn && CommandLine.arguments.contains("-evening") }
+
+    /// -demoScreen margins — открыть вкладку «На полях».
+    static var startOnMargins: Bool {
         guard isOn, let i = CommandLine.arguments.firstIndex(of: "-demoScreen"),
               i + 1 < CommandLine.arguments.count else { return false }
-        return CommandLine.arguments[i + 1] == "thoughts"
+        return CommandLine.arguments[i + 1] == "margins"
     }
 
     /// -holdSplash — остановить заставку на последнем кадре (для снимка).

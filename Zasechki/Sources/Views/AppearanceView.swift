@@ -1,4 +1,5 @@
 import SwiftUI
+import SwiftData
 
 /// Выбор темы: у каждой — миниатюра иконки в её цветах.
 struct AppearanceView: View {
@@ -28,6 +29,9 @@ struct AppearanceView: View {
                         }
                     }
                 }
+
+                BackupSection()
+                    .padding(.top, 40)
 
                 Credits()
                     .frame(maxWidth: .infinity)
@@ -148,5 +152,102 @@ private struct Credits: View {
             .buttonStyle(.plain)
             .accessibilityLabel("Открыть репозиторий Tick на GitHub")
         }
+    }
+}
+
+/// Резервная копия: сохранить всё в файл и загрузить обратно (или на другом устройстве).
+private struct BackupSection: View {
+    @Environment(\.palette) private var p
+    @Environment(\.modelContext) private var context
+    @Query private var items: [TodoItem]
+    @Query private var thoughts: [Thought]
+
+    @State private var exportDocument: BackupDocument?
+    @State private var importing = false
+    @State private var status: String?
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            Text("РЕЗЕРВНАЯ КОПИЯ")
+                .font(.label)
+                .tracking(2)
+                .foregroundStyle(p.inkSoft)
+            Text("Все задачи, история и заметки в одном файле. Через него же можно перенести Tick с iPhone на Mac и обратно")
+                .font(.meta)
+                .foregroundStyle(p.inkSoft)
+                .fixedSize(horizontal: false, vertical: true)
+                .padding(.bottom, 4)
+
+            row("Сохранить в файл", icon: "square.and.arrow.up") { export() }
+            row("Загрузить из файла", icon: "square.and.arrow.down") { importing = true }
+
+            if let status {
+                Text(status)
+                    .font(.meta)
+                    .foregroundStyle(p.dot)
+                    .padding(.top, 2)
+                    .transition(.opacity)
+            }
+        }
+        .fileExporter(isPresented: Binding(get: { exportDocument != nil }, set: { if !$0 { exportDocument = nil } }),
+                      document: exportDocument,
+                      contentType: .json,
+                      defaultFilename: "Tick \(Date().formatted(.iso8601.year().month().day()))") { result in
+            if case .success = result { show("Копия сохранена") }
+        }
+        .fileImporter(isPresented: $importing, allowedContentTypes: [.json]) { result in
+            switch result {
+            case .success(let url): restore(from: url)
+            case .failure: show("Не удалось открыть файл")
+            }
+        }
+    }
+
+    private func row(_ title: String, icon: String, action: @escaping () -> Void) -> some View {
+        Button(action: action) {
+            HStack(spacing: 12) {
+                Image(systemName: icon)
+                    .font(.system(size: 15, weight: .medium))
+                    .frame(width: 20)
+                Text(title)
+                    .font(.system(size: 15, weight: .medium, design: .monospaced))
+                Spacer()
+            }
+            .foregroundStyle(p.ink)
+            .padding(.horizontal, 16)
+            .frame(height: 50)
+            .background(Capsule().fill(p.inkFaint.opacity(0.3)))
+            .contentShape(Capsule())
+        }
+        .buttonStyle(.plain)
+    }
+
+    private func export() {
+        do {
+            exportDocument = BackupDocument(data: try Backup(items: items, thoughts: thoughts).encoded())
+        } catch {
+            show("Не удалось подготовить копию")
+        }
+    }
+
+    private func restore(from url: URL) {
+        let scoped = url.startAccessingSecurityScopedResource()
+        defer { if scoped { url.stopAccessingSecurityScopedResource() } }
+        do {
+            let backup = try Backup.decode(Data(contentsOf: url))
+            let added = backup.merge(into: context, items: items, thoughts: thoughts)
+            if added.tasks + added.notes == 0 {
+                show("Всё из этого файла уже есть в Tick")
+            } else {
+                show("Добавлено: " + RussianPlural.format(added.tasks, "задача", "задачи", "задач")
+                     + " и " + RussianPlural.format(added.notes, "заметка", "заметки", "заметок"))
+            }
+        } catch {
+            show("Это не похоже на копию Tick")
+        }
+    }
+
+    private func show(_ text: String) {
+        withAnimation { status = text }
     }
 }
