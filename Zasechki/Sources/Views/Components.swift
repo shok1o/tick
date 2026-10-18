@@ -125,6 +125,8 @@ struct TaskRow: View {
     var marks: Int = 0
     var trailingNote: String?
     var onToggle: (() -> Void)?
+    /// Задача переносится слишком долго — предложить её отпустить.
+    var onLetGo: (() -> Void)? = nil
 
     var body: some View {
         HStack(alignment: .top, spacing: 14) {
@@ -141,8 +143,18 @@ struct TaskRow: View {
                 }
             }
 
-            TaggedText(text: text, done: done)
-                .frame(maxWidth: .infinity, alignment: .leading)
+            VStack(alignment: .leading, spacing: 6) {
+                TaggedText(text: text, done: done)
+                if let onLetGo, !done {
+                    Button(action: onLetGo) {
+                        Text(RussianPlural.format(marks, "перенос", "переноса", "переносов") + " · отпустить?")
+                            .font(.meta)
+                            .foregroundStyle(p.dot)
+                    }
+                    .buttonStyle(.plain)
+                }
+            }
+            .frame(maxWidth: .infinity, alignment: .leading)
 
             if marks > 0 {
                 TallyMarks(count: marks)

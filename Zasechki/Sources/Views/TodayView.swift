@@ -1,9 +1,9 @@
 import SwiftUI
 import SwiftData
 
-/// Главный экран: сегодняшний день, переключатель «Задачи / Мысли» и строка ввода.
+/// Главный экран: сегодняшний день, вкладки «Сегодня / На полях» и строка ввода.
 struct TodayView: View {
-    enum Tab { case tasks, thoughts }
+    enum Tab { case tasks, margins }
 
     @Binding var path: [Route]
 
@@ -13,10 +13,20 @@ struct TodayView: View {
     @Query(sort: \TodoItem.sortOrder) private var allItems: [TodoItem]
     @Query(sort: \Thought.createdAt, order: .reverse) private var thoughts: [Thought]
 
-    @State private var tab: Tab = Demo.startOnThoughts ? .thoughts : .tasks
+    @State private var tab: Tab = Demo.startOnMargins ? .margins : .tasks
+    // Сам объект держим отдельно от флага показа: окно закрывается раньше,
+    // чем срабатывает кнопка, и без этого действие получило бы nil.
     @State private var editing: TodoItem?
+    @State private var isEditing = false
     @State private var editText = ""
-    @Namespace private var segment
+    @State private var lettingGo: TodoItem?
+    @State private var isLettingGo = false
+    /// День, когда итог дня закрыли крестиком (секунды с 1970 года).
+    @AppStorage("summaryDismissedDay") private var summaryDismissedDay: Double = 0
+    @Namespace private var tabs
+
+    /// После скольких переносов Tick предлагает отпустить задачу — полная «пятёрка».
+    static let letGoThreshold = 5
 
     private var today: Date { clock.today }
     private var items: [TodoItem] { allItems.filter { $0.isInToday(today) } }
@@ -25,14 +35,22 @@ struct TodayView: View {
         items.filter(\.isDone).sorted { ($0.completedAt ?? .distantPast) < ($1.completedAt ?? .distantPast) }
     }
 
+    /// Итог дня показываем вечером, если в дне что-то было и его не закрыли.
+    private var showsSummary: Bool {
+        let evening = Calendar.current.component(.hour, from: Date()) >= 18 || Demo.forceEvening
+        return tab == .tasks && evening && !items.isEmpty
+            && summaryDismissedDay != today.timeIntervalSince1970
+    }
+
     var body: some View {
         List {
             header
-            switcher
+            tabBar
             stats
 
             switch tab {
             case .tasks:
+                if showsSummary { summary }
                 if items.isEmpty {
                     EmptyHint(title: "День чистый",
                               subtitle: "Напишите задачу внизу. Тег — через #, например #дом")
@@ -40,12 +58,12 @@ struct TodayView: View {
                 ForEach(open) { taskRow($0) }
                     .onMove(perform: move)
                 ForEach(done) { taskRow($0) }
-            case .thoughts:
+            case .margins:
                 if thoughts.isEmpty {
-                    EmptyHint(title: "Мыслей пока нет",
-                              subtitle: "Здесь живут идеи без галочек и сроков. Любую можно перенести в задачи")
+                    EmptyHint(title: "На полях пусто",
+                              subtitle: "Записывайте сюда то, что ещё не стало задачей. Без галочек и сроков")
                 }
-                ForEach(thoughts) { thoughtRow($0) }
+                ForEach(thoughts) { noteRow($0) }
             }
         }
         .paperList()
@@ -54,21 +72,31 @@ struct TodayView: View {
         #endif
         .navigationTitle("Tick")
         .safeAreaInset(edge: .bottom, spacing: 0) {
-            InputBar(placeholder: tab == .tasks ? "Задача на сегодня" : "Мысль, без сроков") { text in
+            InputBar(placeholder: tab == .tasks ? "Задача на сегодня" : "Заметка на полях") { text in
                 withAnimation(.easeOut(duration: 0.2)) { add(text) }
             }
         }
-        .alert("Изменить задачу", isPresented: Binding(
-            get: { editing != nil }, set: { if !$0 { editing = nil } }
-        )) {
+        .alert("Изменить задачу", isPresented: $isEditing, presenting: editing) { item in
             TextField("Текст задачи", text: $editText)
             Button("Сохранить") {
                 let t = editText.trimmingCharacters(in: .whitespacesAndNewlines)
-                if let editing, !t.isEmpty { editing.text = t }
-                editing = nil
+                if !t.isEmpty { item.text = t }
             }
-            Button("Отмена", role: .cancel) { editing = nil }
+            Button("Отмена", role: .cancel) {}
         }
+        .confirmationDialog(letGoTitle, isPresented: $isLettingGo, titleVisibility: .visible,
+                            presenting: lettingGo) { item in
+            Button("Унести на поля") { moveToMargins(item) }
+            Button("Отпустить и удалить", role: .destructive) { delete(item) }
+            Button("Оставить ещё", role: .cancel) {}
+        } message: { _ in
+            Text("Иногда задача просто не нужна. Её можно отпустить или унести на поля — без чувства вины.")
+        }
+    }
+
+    private var letGoTitle: String {
+        guard let item = lettingGo else { return "" }
+        return "Переносится уже " + RussianPlural.format(item.marks(asOf: today), "день", "дня", "дней")
     }
 
     // MARK: Шапка
@@ -87,20 +115,15 @@ struct TodayView: View {
                     .minimumScaleFactor(0.6)
             }
             Spacer(minLength: 12)
-            menu
-                .padding(.top, 14)
+            HStack(spacing: 10) {
+                roundButton("clock", label: "История", key: "y") { path.append(.history) }
+                roundButton("circle.lefthalf.filled", label: "Оформление", key: ",") { path.append(.appearance) }
+            }
+            .padding(.top, 14)
         }
         .padding(.top, 16)
         .paperRow()
         .moveDisabled(true)
-    }
-
-    /// Две круглые кнопки справа сверху: история и оформление.
-    private var menu: some View {
-        HStack(spacing: 10) {
-            roundButton("clock", label: "История", key: "y") { path.append(.history) }
-            roundButton("circle.lefthalf.filled", label: "Оформление", key: ",") { path.append(.appearance) }
-        }
     }
 
     private func roundButton(_ icon: String, label: String, key: KeyEquivalent,
@@ -119,49 +142,50 @@ struct TodayView: View {
         .accessibilityLabel(label)
     }
 
-    // MARK: Переключатель
+    // MARK: Вкладки — слова с точкой под активной, как точка на иконке
 
-    private var switcher: some View {
-        HStack(spacing: 2) {
-            segmentButton(.tasks, title: "Задачи", count: open.count, key: "1")
-            segmentButton(.thoughts, title: "Мысли", count: thoughts.count, key: "2")
+    private var tabBar: some View {
+        HStack(alignment: .firstTextBaseline, spacing: 26) {
+            tabButton(.tasks, title: "Сегодня", count: open.count, key: "1")
+            tabButton(.margins, title: "На полях", count: thoughts.count, key: "2")
+            Spacer()
         }
-        .padding(4)
-        .background(Capsule().fill(p.inkFaint.opacity(0.3)))
-        .fixedSize()
-        .frame(maxWidth: .infinity, alignment: .leading)
-        .padding(.top, 24)
+        .padding(.top, 26)
         .paperRow()
         .moveDisabled(true)
     }
 
-    private func segmentButton(_ value: Tab, title: String, count: Int, key: KeyEquivalent) -> some View {
+    private func tabButton(_ value: Tab, title: String, count: Int, key: KeyEquivalent) -> some View {
         let selected = tab == value
         return Button {
-            withAnimation(.snappy(duration: 0.3)) { tab = value }
+            withAnimation(.spring(response: 0.35, dampingFraction: 0.75)) { tab = value }
         } label: {
-            HStack(spacing: 8) {
-                Text(title)
-                    .font(.system(size: 15, weight: .medium, design: .monospaced))
-                Text("\(count)")
-                    .font(.system(size: 12, weight: .semibold, design: .monospaced))
-                    .contentTransition(.numericText())
-                    .padding(.horizontal, 7)
-                    .padding(.vertical, 2)
-                    .background(Capsule().fill(selected ? p.paper.opacity(0.18) : p.inkFaint.opacity(0.45)))
-            }
-            .foregroundStyle(selected ? p.paper : p.inkSoft)
-            .padding(.horizontal, 18)
-            .padding(.vertical, 11)
-            .background {
-                if selected {
-                    Capsule().fill(p.ink).matchedGeometryEffect(id: "segment", in: segment)
+            VStack(alignment: .leading, spacing: 8) {
+                HStack(alignment: .firstTextBaseline, spacing: 6) {
+                    Text(title)
+                        .font(.system(size: 20, weight: selected ? .bold : .regular, design: .monospaced))
+                        .foregroundStyle(selected ? p.ink : p.inkSoft)
+                    Text("\(count)")
+                        .font(.system(size: 12, weight: .medium, design: .monospaced))
+                        .foregroundStyle(selected ? p.dot : p.inkSoft)
+                        .contentTransition(.numericText())
+                        .baselineOffset(8)
+                }
+                ZStack(alignment: .leading) {
+                    Color.clear.frame(width: 8, height: 8)
+                    if selected {
+                        Circle()
+                            .fill(p.dot)
+                            .frame(width: 8, height: 8)
+                            .matchedGeometryEffect(id: "tabDot", in: tabs)
+                    }
                 }
             }
-            .contentShape(Capsule())
+            .contentShape(Rectangle())
         }
         .buttonStyle(.plain)
         .keyboardShortcut(key, modifiers: .command)
+        .accessibilityAddTraits(selected ? .isSelected : [])
     }
 
     // MARK: Сводка
@@ -172,7 +196,7 @@ struct TodayView: View {
                 if tab == .tasks {
                     Text("\(open.count) открыто · \(done.count) готово")
                 } else {
-                    Text(RussianPlural.format(thoughts.count, "мысль", "мысли", "мыслей") + " · без сроков")
+                    Text(RussianPlural.format(thoughts.count, "заметка", "заметки", "заметок") + " · без сроков")
                 }
             }
             .font(.meta)
@@ -182,24 +206,75 @@ struct TodayView: View {
             ProgressDivider(fraction: tab == .tasks && !items.isEmpty
                             ? CGFloat(done.count) / CGFloat(items.count) : 0)
         }
-        .padding(.top, 20)
+        .padding(.top, 18)
         .padding(.bottom, 4)
         .paperRow()
         .moveDisabled(true)
     }
 
+    /// Вечерняя карточка: что закрыто и что переедет на завтра.
+    private var summary: some View {
+        HStack(alignment: .top, spacing: 14) {
+            VStack(alignment: .leading, spacing: 8) {
+                Text("ИТОГ ДНЯ")
+                    .font(.label)
+                    .tracking(2)
+                    .foregroundStyle(p.dot)
+                Text(summaryText)
+                    .font(.task)
+                    .foregroundStyle(p.ink)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+            .frame(maxWidth: .infinity, alignment: .leading)
+            Button {
+                withAnimation(.easeOut(duration: 0.25)) { summaryDismissedDay = today.timeIntervalSince1970 }
+            } label: {
+                Image(systemName: "xmark")
+                    .font(.system(size: 11, weight: .semibold))
+                    .foregroundStyle(p.inkSoft)
+                    .frame(width: 26, height: 26)
+                    .background(Circle().fill(p.inkFaint.opacity(0.3)))
+            }
+            .buttonStyle(.plain)
+            .accessibilityLabel("Скрыть итог дня")
+        }
+        .padding(16)
+        .background(RoundedRectangle(cornerRadius: 18, style: .continuous).fill(p.inkFaint.opacity(0.22)))
+        .padding(.vertical, 10)
+        .paperRow()
+        .moveDisabled(true)
+        .transition(.opacity.combined(with: .move(edge: .top)))
+    }
+
+    private var summaryText: String {
+        if open.isEmpty {
+            return "Закрыто всё — " + RussianPlural.format(done.count, "задача", "задачи", "задач")
+                + ". Завтра начнём с чистого листа."
+        }
+        let closed = done.isEmpty
+            ? "Сегодня пока ничего не закрыто."
+            : "Закрыто " + RussianPlural.format(done.count, "задача", "задачи", "задач") + "."
+        let moving = open.count == 1 || (open.count % 10 == 1 && open.count % 100 != 11)
+            ? RussianPlural.format(open.count, "задача", "задачи", "задач") + " переедет на завтра и получит засечку."
+            : RussianPlural.format(open.count, "задача", "задачи", "задач") + " переедут на завтра и получат по засечке."
+        return closed + " " + moving
+    }
+
     // MARK: Строки
 
     private func taskRow(_ item: TodoItem) -> some View {
-        TaskRow(text: item.text, done: item.isDone, marks: item.marks(asOf: today)) {
-            withAnimation(.easeInOut(duration: 0.25)) { Store.toggle(item, today: today) }
-        }
+        let marks = item.marks(asOf: today)
+        return TaskRow(
+            text: item.text, done: item.isDone, marks: marks,
+            onToggle: { withAnimation(.easeInOut(duration: 0.25)) { Store.toggle(item, today: today) } },
+            onLetGo: marks >= Self.letGoThreshold ? { lettingGo = item; isLettingGo = true } : nil
+        )
         .contextMenu {
             Button("Изменить", systemImage: "pencil") { startEditing(item) }
             Button(item.isDone ? "Вернуть" : "Выполнить", systemImage: "checkmark") {
                 withAnimation { Store.toggle(item, today: today) }
             }
-            Button("В мысли", systemImage: "lightbulb") { demote(item) }
+            Button("На поля", systemImage: "text.alignleft") { moveToMargins(item) }
             Divider()
             Button("Удалить", systemImage: "trash", role: .destructive) { delete(item) }
         }
@@ -217,7 +292,7 @@ struct TodayView: View {
         }
     }
 
-    private func thoughtRow(_ thought: Thought) -> some View {
+    private func noteRow(_ thought: Thought) -> some View {
         HStack(alignment: .top, spacing: 14) {
             Capsule()
                 .fill(p.inkFaint)
@@ -241,15 +316,15 @@ struct TodayView: View {
                     .background(Circle().fill(p.dot.opacity(0.12)))
             }
             .buttonStyle(.plain)
-            .help("Перенести в задачи на сегодня")
-            .accessibilityLabel("Перенести в задачи на сегодня")
+            .help("Сделать задачей на сегодня")
+            .accessibilityLabel("Сделать задачей на сегодня")
         }
         .padding(.vertical, 14)
         .overlay(alignment: .bottom) { RowSeparator() }
         .contentShape(Rectangle())
         .paperRow()
         .contextMenu {
-            Button("В задачи на сегодня", systemImage: "arrow.up.right") { promote(thought) }
+            Button("Сделать задачей на сегодня", systemImage: "arrow.up.right") { promote(thought) }
             Divider()
             Button("Удалить", systemImage: "trash", role: .destructive) { remove(thought) }
         }
@@ -269,7 +344,7 @@ struct TodayView: View {
         switch tab {
         case .tasks:
             Store.addTask(text, today: today, in: context, existing: allItems)
-        case .thoughts:
+        case .margins:
             let t = text.trimmingCharacters(in: .whitespacesAndNewlines)
             guard !t.isEmpty else { return }
             context.insert(Thought(text: t))
@@ -279,14 +354,15 @@ struct TodayView: View {
     private func startEditing(_ item: TodoItem) {
         editText = item.text
         editing = item
+        isEditing = true
     }
 
     private func delete(_ item: TodoItem) {
         withAnimation { Store.delete(item, today: today, in: context) }
     }
 
-    /// Задача оказалась пока не задачей — уносим её в мысли.
-    private func demote(_ item: TodoItem) {
+    /// Задача оказалась пока не задачей — уносим её на поля.
+    private func moveToMargins(_ item: TodoItem) {
         withAnimation {
             context.insert(Thought(text: item.text))
             Store.delete(item, today: today, in: context)
